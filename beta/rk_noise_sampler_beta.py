@@ -35,6 +35,8 @@ NOISE_MODE_NAMES = ["none",
                     "hard_var", 
                     ]
 
+NOISE_MODES_DOWN = ("soft", "softer", "soft-linear")   # modes that define sigma_down rather than sigma_up
+
 
 
 def get_data_from_step(x, x_next, sigma, sigma_next): # assumes 100% linear trajectory
@@ -445,6 +447,11 @@ class RK_NoiseSampler:
         else:
             noise_mode = self.noise_mode_sde
         
+        # These modes are defined in terms of sigma_down (as in legacy/noise_sigmas_timesteps_scaling.py):
+        # their eta_ratio below is (1 - sigma_down / sigma_next), so they must always use the DOWN parameterization.
+        if noise_mode in NOISE_MODES_DOWN:
+            DOWN = True
+        
         if DOWN: #calculates noise level by first scaling sigma_down from sigma_next, instead of sigma_up from sigma_next
             eta_fn = lambda eta_scale: 1-eta_scale
             sud_fn = lambda sd: (sd, None)
@@ -466,12 +473,19 @@ class RK_NoiseSampler:
             case "exp":
                 h = -(sigma_next_n/sigma_n).log()
                 eta_ratio = (1 - (-2*eta*h).exp())**.5
-            case "soft":
-                eta_ratio = 1-(1 - eta) + eta * (sigma_next_n / sigma_n)
-            case "softer":
+            case "soft":        # sigma_down = sigma_next * ((1 - eta) + eta * sigma_next / sigma)
+                eta_ratio = 1 - ((1 - eta) + eta * (sigma_next_n / sigma_n))
+            case "softer":      # sigma_down = sigma_next * sqrt(1 - eta^2 * (sigma^2 - sigma_next^2) / sigma^2)
                 eta_ratio = 1-torch.sqrt(1 - (eta**2 * (sigma_n**2 - sigma_next_n**2)) / sigma_n**2)
-            case "soft-linear":
-                eta_ratio = 1-eta * (sigma_next_n - sigma_n)
+            case "soft-linear": # sigma_down = sigma_next + eta * (sigma_next - sigma); no noise if that would be < 0
+                if sigma_next_n > 0:
+                    eta_ratio = eta * (sigma_n - sigma_next_n) / sigma_next_n
+                    if eta_ratio > 1:
+                        eta_ratio = 0
+                    elif eta_ratio > 0.9999:
+                        eta_ratio = 0.9999   # keep sigma_down > 0: exponential integrators use log(sigma_down)
+                else:
+                    eta_ratio = 0
             case "sinusoidal":
                 eta_ratio = eta * torch.sin(torch.pi * sigma_next_n) ** 2
             case "eps":
@@ -503,7 +517,11 @@ class RK_NoiseSampler:
                     alpha_ratio = torch.ones_like(sigma)
 
             case "vpsde":
-                alpha_ratio, sd, su = self.get_vpsde_step_RF(sigma, sigma_next, eta)
+                if VARIANCE_PRESERVING:
+                    su, sd, alpha_ratio = self.get_vpsde_step_RF(sigma, sigma_next, eta)   # returns (sigma_up, sigma_down, alpha_ratio)
+                else:
+                    RESplain("vpsde noise mode is only defined for rectified flow models: falling back to hard noise mode.", debug=True)
+                    eta_ratio = eta
 
             case "er4":
                 noise_scaler = lambda s: s * ((s ** eta).exp() + 10.0)
