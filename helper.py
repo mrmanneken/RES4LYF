@@ -23,8 +23,6 @@ def fp64_available(device) -> bool:
     device = torch.device(device)
     if device.type == 'mps':
         return False
-    if device.type != 'cpu' and comfy.model_management.is_directml_enabled():
-        return False
     return True
 
 def clamp_dtype(dtype, *devices):
